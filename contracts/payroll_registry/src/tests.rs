@@ -389,6 +389,178 @@ fn test_reactivating_inactive_employee_restores_eligibility() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #615: employee eligibility status evaluation
+// ---------------------------------------------------------------------------
+
+/// Register a company with one employee, returning both for reuse below.
+fn setup_with_employee() -> (Env, PayrollRegistryClient<'static>, u64, Address) {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[7u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    (env, client, company_id, employee)
+}
+
+#[test]
+fn test_evaluate_eligibility_reports_eligible_for_active_employee() {
+    let (_env, client, company_id, employee) = setup_with_employee();
+
+    let assessment = client.evaluate_eligibility(&company_id, &employee);
+
+    assert!(assessment.eligible, "an added employee starts Active");
+    assert_eq!(assessment.reason, EligibilityReason::Eligible);
+    assert_eq!(assessment.status, EmployeeStatus::Active);
+}
+
+#[test]
+fn test_evaluate_eligibility_reports_unregistered_for_unknown_address() {
+    let (env, client, company_id, _employee) = setup_with_employee();
+    let stranger = Address::generate(&env);
+
+    let assessment = client.evaluate_eligibility(&company_id, &stranger);
+
+    assert!(!assessment.eligible);
+    assert_eq!(assessment.reason, EligibilityReason::Unregistered);
+    // Never-set status still reports the documented `Incomplete` default.
+    assert_eq!(assessment.status, EmployeeStatus::Incomplete);
+}
+
+#[test]
+fn test_evaluate_eligibility_reports_inactive() {
+    let (_env, client, company_id, employee) = setup_with_employee();
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+
+    let assessment = client.evaluate_eligibility(&company_id, &employee);
+
+    assert!(!assessment.eligible);
+    assert_eq!(assessment.reason, EligibilityReason::Inactive);
+    assert_eq!(assessment.status, EmployeeStatus::Inactive);
+}
+
+#[test]
+fn test_evaluate_eligibility_reports_incomplete() {
+    let (_env, client, company_id, employee) = setup_with_employee();
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Incomplete);
+
+    let assessment = client.evaluate_eligibility(&company_id, &employee);
+
+    assert!(!assessment.eligible);
+    assert_eq!(assessment.reason, EligibilityReason::Incomplete);
+}
+
+#[test]
+fn test_evaluate_eligibility_flags_removed_employee_despite_stale_active_status() {
+    // `remove_employee` deletes the record but leaves the status key behind, so
+    // a removed employee still reports status `Active`. The record check must
+    // still win, otherwise a removed address would look payable.
+    let (_env, client, company_id, employee) = setup_with_employee();
+    client.remove_employee(&company_id, &employee);
+
+    let assessment = client.evaluate_eligibility(&company_id, &employee);
+
+    assert_eq!(
+        client.get_employee_status(&company_id, &employee),
+        EmployeeStatus::Active
+    );
+    assert!(!assessment.eligible);
+    assert_eq!(assessment.reason, EligibilityReason::Unregistered);
+}
+
+#[test]
+fn test_evaluate_eligibility_agrees_with_is_eligible_for_every_status() {
+    let (_env, client, company_id, employee) = setup_with_employee();
+    let statuses = [
+        EmployeeStatus::Active,
+        EmployeeStatus::Inactive,
+        EmployeeStatus::Incomplete,
+    ];
+
+    for status in statuses {
+        client.set_employee_status(&company_id, &employee, &status);
+
+        let assessment = client.evaluate_eligibility(&company_id, &employee);
+
+        assert_eq!(
+            assessment.eligible,
+            client.is_eligible(&company_id, &employee),
+            "eligible flag diverged from is_eligible for status {status:?}"
+        );
+        assert_eq!(
+            assessment.eligible,
+            client.is_employee_active(&company_id, &employee),
+            "eligible flag diverged from is_employee_active for status {status:?}"
+        );
+        assert_eq!(
+            assessment.eligible,
+            assessment.reason == EligibilityReason::Eligible
+        );
+    }
+}
+
+#[test]
+fn test_require_eligible_returns_status_for_eligible_employee() {
+    let (_env, client, company_id, employee) = setup_with_employee();
+
+    assert_eq!(
+        client.require_eligible(&company_id, &employee),
+        EmployeeStatus::Active
+    );
+}
+
+#[test]
+#[should_panic(expected = "employee is not registered with this company")]
+fn test_require_eligible_rejects_unregistered_employee() {
+    let (env, client, company_id, _employee) = setup_with_employee();
+    let stranger = Address::generate(&env);
+
+    client.require_eligible(&company_id, &stranger);
+}
+
+#[test]
+#[should_panic(expected = "employee is inactive")]
+fn test_require_eligible_rejects_inactive_employee() {
+    let (_env, client, company_id, employee) = setup_with_employee();
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+
+    client.require_eligible(&company_id, &employee);
+}
+
+#[test]
+#[should_panic(expected = "employee record is incomplete")]
+fn test_require_eligible_rejects_incomplete_employee() {
+    let (_env, client, company_id, employee) = setup_with_employee();
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Incomplete);
+
+    client.require_eligible(&company_id, &employee);
+}
+
+#[test]
+fn test_each_ineligibility_reason_explains_its_remediation() {
+    let reasons = [
+        EligibilityReason::Eligible,
+        EligibilityReason::Unregistered,
+        EligibilityReason::Incomplete,
+        EligibilityReason::Inactive,
+    ];
+
+    let mut seen: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for reason in reasons {
+        let message = reason.as_str();
+        assert!(!message.is_empty(), "{reason:?} must explain itself");
+        assert!(
+            !seen.contains(&message),
+            "{reason:?} reuses another reason's message"
+        );
+        seen.push(message);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Event emission tests
 // ---------------------------------------------------------------------------
 

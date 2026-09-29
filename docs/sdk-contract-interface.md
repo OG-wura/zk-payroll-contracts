@@ -183,6 +183,44 @@ Register an employee with a private salary commitment.
 | `Inactive` (1) | Temporarily ineligible |
 | `Incomplete` (2) | Default; onboarding not finished |
 
+### Checking why an employee is (not) eligible
+
+`is_eligible` answers only *whether* an employee can be paid. To explain a
+rejected payout, use `evaluate_eligibility`, which is read-only, needs no
+authorisation, and reports a single reason plus the remediation for it.
+
+**Entrypoint:** `PayrollRegistry::evaluate_eligibility`
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `status` | `EmployeeStatus` | Stored status, defaulting to `Incomplete` when never set |
+| `reason` | `EligibilityReason` | The one reason that determines eligibility |
+| `eligible` | `bool` | Always agrees with `reason == Eligible` |
+
+| `EligibilityReason` | Meaning | Remediation |
+|----------------------|---------|-------------|
+| `Eligible` (0) | Registered and `Active` | — |
+| `Unregistered` (1) | No employee record for this company | Onboard the employee |
+| `Incomplete` (2) | Record is missing required data | Finish registration, set `Active` |
+| `Inactive` (3) | Deactivated (e.g. on leave) | Set the status back to `Active` |
+
+An employee record is required for *every* status, so an address that was
+never onboarded — or whose record was removed while its status key lingered
+— is always reported as `Unregistered`, never `Eligible`.
+
+**Entrypoint:** `PayrollRegistry::require_eligible`
+
+Returns the employee's `EmployeeStatus` when they are eligible, and
+otherwise panics with a message naming the reason and its fix, e.g.:
+
+```
+Employee Contract(...) is not eligible for payroll in company 0: employee is inactive; set status to Active to restore eligibility
+```
+
+Use `evaluate_eligibility` when an ineligible employee is an expected
+outcome you want to report; use `require_eligible` when it is a bug you
+want surfaced loudly.
+
 ### Updating commitments
 
 When salary changes, use one of:
