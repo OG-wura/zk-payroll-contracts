@@ -672,6 +672,21 @@ pub enum CompanyState {
 //
 // See `contracts/integration_tests/` for versioning test examples.
 
+/// Storage key for the single active payroll period (#578).
+///
+/// Deliberately separate from [`DataKey`]: that enum is already at the
+/// Soroban contract-spec ceiling of 50 cases, so it cannot take another
+/// variant without dropping an existing storage key. Keying this one
+/// feature on its own keeps `DataKey` — and every key already persisted by
+/// deployed contracts — untouched.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivePeriodKey {
+    /// The active period label. Absent means no period is active, which is
+    /// the pre-#578 default.
+    Active,
+}
+
 #[contracttype]
 pub enum DataKey {
     Addresses,
@@ -3145,6 +3160,18 @@ impl Payroll {
         // Issue #471: reject new payroll work for a frozen (finalized) period.
         Self::require_period_not_frozen(&e, &period_label);
 
+        // Issue #578: when a period is active, new payroll work must target
+        // it, so a run can never be drafted against a period the operator is
+        // not currently running. Only enforced once a period is opened, so
+        // the pre-#578 behaviour (no active period) is unchanged.
+        if let Some(active) = Self::get_active_period(e.clone()) {
+            if active != period_label {
+                panic!(
+                    "A different payroll period is active; close it or draft against the active period"
+                );
+            }
+        }
+
         // Issue #398: reject a duplicate draft for a period that already has
         // one pending. Cleared when the existing draft leaves Pending
         // (finalize/cancel/expire) — not wired into those paths in this
@@ -4208,6 +4235,87 @@ impl Payroll {
         e.storage()
             .persistent()
             .has(&DataKey::PeriodFreeze(period_label))
+    }
+
+    // -- Issue #578: active payroll period uniqueness --------------------------
+
+    /// Open the single active payroll period (#578).
+    ///
+    /// At most one period is active at a time. Without this, two consecutive
+    /// opens leave it ambiguous which period payroll work belongs to, and a
+    /// freeze applied to one period silently does not cover the other.
+    ///
+    /// Only the `admin` may open a period. Opening a period while another is
+    /// already active is rejected rather than re-pointing the active period,
+    /// so the caller is told to close the current period first.
+    ///
+    /// Emits `payroll_period_opened`.
+    pub fn open_payroll_period(e: Env, admin: Address, period_label: Symbol) {
+        Self::require_not_paused(&e);
+        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        // Issue #578: the uniqueness check. Both rejections name the fix
+        // rather than leaving the caller guessing which period is active.
+        if let Some(active) = Self::get_active_period(e.clone()) {
+            if active == period_label {
+                panic!("Payroll period is already the active period");
+            }
+            panic!("An active payroll period already exists: close it before opening a new one");
+        }
+
+        e.storage()
+            .persistent()
+            .set(&ActivePeriodKey::Active, &period_label);
+
+        payroll_events::emit_payroll_period_opened(&e, period_label, admin);
+    }
+
+    /// Close the active payroll period (#578).
+    ///
+    /// Only the `admin` may close. Closing clears the active period so a new
+    /// one can be opened; per-period state (drafts, freezes) is keyed by
+    /// period label and is deliberately left untouched, so a later re-open of
+    /// the same label resumes against the state it already has.
+    ///
+    /// Closing when no period is active is rejected so the lifecycle stays
+    /// unambiguous.
+    ///
+    /// Emits `payroll_period_closed`.
+    pub fn close_payroll_period(e: Env, admin: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let period_label: Symbol = e
+            .storage()
+            .persistent()
+            .get(&ActivePeriodKey::Active)
+            .expect("No active payroll period to close");
+
+        e.storage().persistent().remove(&ActivePeriodKey::Active);
+
+        payroll_events::emit_payroll_period_closed(&e, period_label, admin);
+    }
+
+    /// Return the active payroll period, if one is open (#578).
+    pub fn get_active_period(e: Env) -> Option<Symbol> {
+        e.storage().persistent().get(&ActivePeriodKey::Active)
     }
 
     /// Count executed payroll runs whose metadata was bound to `period_label`

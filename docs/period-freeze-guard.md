@@ -89,6 +89,14 @@ draft transitions (`submit`, `cancel`, `expire`) now clear that slot
 (previously a stale entry could block later drafts for the period — relevant
 exactly in the unfreeze-and-correct flow described above).
 
+## Interaction with the active payroll period (#578)
+
+The active payroll period is a separate mechanism from the freeze guard:
+it pins payroll work to one period at a time, while the freeze guard blocks
+edits to a finalized period. Freezing does not own or clear the active slot,
+and closing a period does not unfreeze it. See
+[Active Payroll Period Uniqueness](active-payroll-period.md).
+
 ## QA coverage
 
 `contracts/payroll/tests/period_freeze_guard.rs` covers:

@@ -1116,6 +1116,24 @@ pub fn emit_period_unfrozen(e: &Env, period_label: Symbol, unfrozen_by: Address)
     );
 }
 
+/// Emitted when the admin opens the single active payroll period (#578).
+/// Carries only the period label and admin — no payroll values.
+pub fn emit_payroll_period_opened(e: &Env, period_label: Symbol, opened_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "payroll_period_opened")),
+        (period_label, opened_by),
+    );
+}
+
+/// Emitted when the admin closes the active payroll period (#578).
+/// Carries only the period label and admin — no payroll values.
+pub fn emit_payroll_period_closed(e: &Env, period_label: Symbol, closed_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "payroll_period_closed")),
+        (period_label, closed_by),
+    );
+}
+
 #[cfg(test)]
 mod privacy_safe_schema_tests {
     use super::{
