@@ -546,11 +546,19 @@ Two entrypoints are available depending on whether the auditor supplies the key 
   "verification_pass_count": 4,
   "verification_fail_count": 1,
   "exported_at": 1700090000,
-  "exported_by": "GCNP...AUDITOR_ADDRESS..."
+  "exported_by": "GCNP...AUDITOR_ADDRESS...",
+  "integrity_marker": "9f2c...64_HEX_CHARS"
 }
 ```
 
 This never includes salary values — only counts and pass/fail status.
+
+The `integrity_marker` is a deterministic SHA-256 digest binding every other
+field of the summary (#607). Verify it with
+`AuditModule::verify_audit_export_integrity(summary)` before trusting an export:
+`true` means intact, `false` means a field was altered, and
+`IntegrityMarkerMissing` means the export carried no marker. See
+[Audit Export Integrity](audit-export-integrity.md).
 
 ### Step 5 (optional) — Revoke access
 
@@ -569,6 +577,7 @@ This never includes salary values — only counts and pass/fail status.
 | `AuditModule::query_by_employee`   | Entries for a specific employee |
 | `AuditModule::query_by_period`     | Entries within a time range     |
 | `AuditModule::get_audit_log_count` | Total entry count for a company |
+| `AuditModule::verify_audit_export_integrity` | Verify an exported summary's integrity marker (#607) |
 
 ---
 

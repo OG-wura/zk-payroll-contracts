@@ -620,6 +620,125 @@ fn test_export_audit_summary_emits_event() {
     assert_eq!(event_count(&env), 1);
 }
 
+// ── Issue #607: audit export integrity marker ────────────────────────────────
+
+#[test]
+fn test_export_audit_summary_carries_verifiable_integrity_marker() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let now = env.ledger().timestamp();
+    let summary = client.export_audit_summary(&auditor, &company_id, &0u64, &(now + 1_000));
+
+    assert_ne!(
+        summary.integrity_marker,
+        BytesN::from_array(&env, &[0u8; 32]),
+        "export must carry a non-zero integrity marker"
+    );
+    assert!(
+        client.verify_audit_export_integrity(&summary),
+        "a freshly exported summary must verify"
+    );
+}
+
+#[test]
+fn test_audit_export_integrity_detects_tampered_count() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let now = env.ledger().timestamp();
+    let summary = client.export_audit_summary(&auditor, &company_id, &0u64, &(now + 1_000));
+
+    // Forge a more favourable export by inflating the pass count without
+    // recomputing the marker — verification must reject it.
+    let mut tampered = summary.clone();
+    tampered.verification_pass_count += 1;
+
+    assert!(
+        !client.verify_audit_export_integrity(&tampered),
+        "a tampered count must not verify"
+    );
+    // The original export is unaffected.
+    assert!(client.verify_audit_export_integrity(&summary));
+}
+
+#[test]
+fn test_audit_export_integrity_detects_tampered_exporter() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let now = env.ledger().timestamp();
+    let summary = client.export_audit_summary(&auditor, &company_id, &0u64, &(now + 1_000));
+
+    let mut tampered = summary.clone();
+    tampered.exported_by = soroban_sdk::Address::generate(&env);
+
+    assert!(
+        !client.verify_audit_export_integrity(&tampered),
+        "changing the exporter must invalidate the marker"
+    );
+}
+
+#[test]
+fn test_audit_export_integrity_rejects_missing_marker() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let company_id = Symbol::new(&env, "default");
+    let summary = AuditMetadataSummary {
+        company_id: company_id.clone(),
+        period_start: 0,
+        period_end: 1_000,
+        total_audit_entries: 0,
+        verification_pass_count: 0,
+        verification_fail_count: 0,
+        exported_at: 0,
+        exported_by: auditor,
+        integrity_marker: BytesN::from_array(&env, &[0u8; 32]),
+    };
+
+    let result = client.try_verify_audit_export_integrity(&summary);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AuditError::IntegrityMarkerMissing
+    );
+}
+
+#[test]
+fn test_audit_export_integrity_marker_is_deterministic() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let now = env.ledger().timestamp();
+
+    // Exporting the same unchanged on-chain state twice yields the same marker.
+    let first = client.export_audit_summary(&auditor, &company_id, &0u64, &(now + 1_000));
+    let second = client.export_audit_summary(&auditor, &company_id, &0u64, &(now + 1_000));
+
+    assert_eq!(first.integrity_marker, second.integrity_marker);
+}
+
 // ── Issue #172: revoked audit grants cannot read/export/validate audit data ──
 //
 // These tests confirm that once `revoke_view_key` succeeds, every

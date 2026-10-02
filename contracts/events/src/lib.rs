@@ -772,7 +772,7 @@ pub fn emit_audit_access_revoked(e: &Env, admin: Address, auditor: Address) {
         .publish((Symbol::new(e, "AuditAccessRevoked"), admin, auditor), ());
 }
 
-/// Emitted when an expired audit grant is permanently removed.
+</// Emitted when an expired audit grant is permanently removed.
 pub fn emit_audit_grant_pruned(e: &Env, admin: Address, auditor: Address) {
     e.events()
         .publish((Symbol::new(e, "AuditGrantPruned"), admin, auditor), ());
@@ -835,6 +835,77 @@ pub fn emit_quorum_consumed(e: &Env, batch_root: BytesN<32>, employer: Address, 
     e.events().publish(
         (Symbol::new(e, "signing"), Symbol::new(e, "quorum_consumed")),
         (batch_root, employer, nonce),
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Settlement Window Events (#316)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when the settlement window contract is initialised with its admin.
+pub fn emit_settlement_window_initialized(e: &Env, admin: Address) {
+    e.events()
+        .publish((Symbol::new(e, "SettlementWindowInit"),), (admin,));
+}
+
+/// Emitted when a payout window period is created.
+pub fn emit_settlement_period_created(
+    e: &Env,
+    company_id: u64,
+    period_id: u32,
+    open_at: u64,
+    execute_at: u64,
+    grace_until: u64,
+    close_at: u64,
+) {
+    e.events().publish(
+        (
+            Symbol::new(e, "SettlementPeriodCreated"),
+            company_id,
+            period_id,
+        ),
+        (open_at, execute_at, grace_until, close_at),
+    );
+}
+
+/// Emitted when a payout window period advances to a new lifecycle phase.
+pub fn emit_settlement_period_phase_changed(
+    e: &Env,
+    company_id: u64,
+    period_id: u32,
+    phase: Symbol,
+) {
+    e.events().publish(
+        (
+            Symbol::new(e, "SettlementPhaseChanged"),
+            company_id,
+            period_id,
+        ),
+        (phase,),
+    );
+}
+
+/// Emitted when a payout window period is cancelled by an admin.
+pub fn emit_settlement_period_cancelled(e: &Env, company_id: u64, period_id: u32, at: u64) {
+    e.events().publish(
+        (
+            Symbol::new(e, "SettlementPeriodCancelled"),
+            company_id,
+            period_id,
+        ),
+        (at,),
+    );
+}
+
+/// Emitted when a payout window period expires after its grace boundary.
+pub fn emit_settlement_period_expired(e: &Env, company_id: u64, period_id: u32, at: u64) {
+    e.events().publish(
+        (
+            Symbol::new(e, "SettlementPeriodExpired"),
+            company_id,
+            period_id,
+        ),
+        (at,),
     );
 }
 

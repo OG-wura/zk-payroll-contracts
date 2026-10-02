@@ -41,7 +41,7 @@ pub enum AuditError {
     DelegationExceedsParentExpiry = 11,
     /// A delegated grant is no longer valid because its parent grant was revoked.
     DelegationRevoked = 12,
-    /// The proof reference hash is invalid (empty or all-zero sentinel).
+<    /// The proof reference hash is invalid (empty or all-zero sentinel).
     InvalidProofReference = 13,
     /// A challenge with this ID does not exist.
     ChallengeNotFound = 14,
@@ -51,6 +51,8 @@ pub enum AuditError {
     ChallengeAlreadyResolved = 16,
     /// An invalid challenge ID or out-of-scope challenge was submitted.
     InvalidChallenge = 17,
+    /// The supplied export has no integrity marker (all-zero) and cannot be verified.
+    IntegrityMarkerMissing = 18,
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +134,8 @@ pub struct AuditQueryResult {
 /// - `verification_fail_count`  — entries where `matched == false`.
 /// - `exported_at`              — ledger timestamp of the export call.
 /// - `exported_by`              — auditor address that triggered the export.
+/// - `integrity_marker`         — deterministic digest binding every other
+///   field of this summary (see `verify_audit_export_integrity`).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AuditMetadataSummary {
@@ -143,6 +147,7 @@ pub struct AuditMetadataSummary {
     pub verification_fail_count: u32,
     pub exported_at: u64,
     pub exported_by: Address,
+    pub integrity_marker: BytesN<32>,
 }
 
 /// Storage key namespace.
@@ -852,6 +857,19 @@ impl AuditModule {
             }
         }
 
+        let exported_at = env.ledger().timestamp();
+        let integrity_marker = Self::compute_audit_export_integrity_marker(
+            &env,
+            &company_id,
+            period_start,
+            period_end,
+            total,
+            pass_count,
+            fail_count,
+            exported_at,
+            &auditor,
+        );
+
         let summary = AuditMetadataSummary {
             company_id: company_id.clone(),
             period_start,
@@ -859,8 +877,9 @@ impl AuditModule {
             total_audit_entries: total,
             verification_pass_count: pass_count,
             verification_fail_count: fail_count,
-            exported_at: env.ledger().timestamp(),
+            exported_at,
             exported_by: auditor.clone(),
+            integrity_marker,
         };
 
         payroll_events::emit_audit_summary_exported(
@@ -873,6 +892,45 @@ impl AuditModule {
         );
 
         Ok(summary)
+    }
+
+    // ── Issue #607: audit export integrity marker ────────────────────────────
+
+    /// Verify that an exported summary's integrity marker binds its contents.
+    ///
+    /// Every export carries a deterministic `integrity_marker` computed at
+    /// export time. This entrypoint recomputes the marker from the summary's
+    /// metadata fields and compares it to the exported value, so an external
+    /// consumer can detect a post-export mutation of any field (period bounds,
+    /// verification counts, exporter, or export timestamp).
+    ///
+    /// Returns:
+    /// - `Ok(true)`  — the marker matches; the export is intact.
+    /// - `Ok(false)` — the marker does not match; the export was altered.
+    /// - `Err(AuditError::IntegrityMarkerMissing)` — no marker was supplied
+    ///   (all-zero), so integrity cannot be established.
+    pub fn verify_audit_export_integrity(
+        env: Env,
+        summary: AuditMetadataSummary,
+    ) -> Result<bool, AuditError> {
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        if summary.integrity_marker == zero {
+            return Err(AuditError::IntegrityMarkerMissing);
+        }
+
+        let expected = Self::compute_audit_export_integrity_marker(
+            &env,
+            &summary.company_id,
+            summary.period_start,
+            summary.period_end,
+            summary.total_audit_entries,
+            summary.verification_pass_count,
+            summary.verification_fail_count,
+            summary.exported_at,
+            &summary.exported_by,
+        );
+
+        Ok(expected == summary.integrity_marker)
     }
 
     // ── Issue #177: metadata hash verification via audit scope ───────────────
@@ -995,6 +1053,38 @@ impl AuditModule {
         preimage.extend_from_array(&amount.to_le_bytes());
         let blinding_slice: [u8; 32] = blinding.into();
         preimage.extend_from_array(&blinding_slice);
+        env.crypto().sha256(&preimage).into()
+    }
+
+    /// Compute the deterministic integrity marker for an audit metadata
+    /// export (#607).
+    ///
+    /// The digest is `SHA-256` over a domain separator (`zkpayroll_audit_export_v1`)
+    /// followed by every exported field in a canonical encoding. Binding all
+    /// fields means any change to the summary — including its exporter and
+    /// export timestamp — produces a different marker.
+    #[allow(clippy::too_many_arguments)]
+    fn compute_audit_export_integrity_marker(
+        env: &Env,
+        company_id: &Symbol,
+        period_start: u64,
+        period_end: u64,
+        total_audit_entries: u32,
+        verification_pass_count: u32,
+        verification_fail_count: u32,
+        exported_at: u64,
+        exported_by: &Address,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.extend_from_slice(b"zkpayroll_audit_export_v1");
+        preimage.append(&company_id.to_xdr(env));
+        preimage.extend_from_array(&period_start.to_le_bytes());
+        preimage.extend_from_array(&period_end.to_le_bytes());
+        preimage.extend_from_array(&total_audit_entries.to_le_bytes());
+        preimage.extend_from_array(&verification_pass_count.to_le_bytes());
+        preimage.extend_from_array(&verification_fail_count.to_le_bytes());
+        preimage.extend_from_array(&exported_at.to_le_bytes());
+        preimage.append(&exported_by.to_xdr(env));
         env.crypto().sha256(&preimage).into()
     }
 

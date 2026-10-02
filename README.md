@@ -19,6 +19,8 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 - **Execution Initiator Authorization** — Every payroll preparation/execution path validates that its initiator is the registered admin, with a read-only preflight for SDKs and dashboards
 - **Duplicate Execution Guard** — Payroll runs cannot be executed twice; a second execution attempt fails with an actionable error without exposing salary or employee values
 - **Compliance Ready** — Selective disclosure for audits via view keys
+- **Audit Export Integrity** — Exported compliance summaries carry a deterministic integrity marker so tampering after export is detectable (#607)
+- **Approved Payroll Revision Protection** — Multi-stage draft approvals are bound to the revision's protected content hash; revising protected fields rolls the approvals back (#616)
 - **On-Chain Verification** — Groth16 proof verification on Soroban
 
 ## Architecture
@@ -60,13 +62,30 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 > [docs/run-expiration.md](docs/run-expiration.md) for the expiry policy, the
 > permissionless expiry flow, and SDK guidance.
 >
-> **Commitment lifecycle:** an approved or settled commitment can be rotated
+<> **Commitment lifecycle:** an approved or settled commitment can be rotated
 > with `rotate_approved_commitment` without dropping its lock (#520) — see
 > [contracts/README.md](contracts/README.md#commitment-rotation-controls-salary_commitment--issue-520).
 >
 > **Duplicate execution guard:** a payroll run can only be executed once. A
 > repeated execution attempt is rejected with an actionable error and never
 > exposes salary, employee, or commitment values.
+>
+> **Role lifecycle:** privileged role transfers require an explicit acceptance
+> from the pending recipient and cannot activate before the acceptance delay
+> elapses (#507) — see
+> [docs/role-transfer-acceptance-delay.md](docs/role-transfer-acceptance-delay.md)
+> for the delay, the privacy-safe status views, and SDK guidance.
+>
+> **Audit exports:** exported compliance summaries carry a deterministic
+> integrity marker that integrators verify before trusting the export (#607) —
+> see [docs/audit-export-integrity.md](docs/audit-export-integrity.md) for the
+> marker formula and verification semantics.
+>
+> **Payroll revisions:** multi-stage draft approvals are bound to the revision's
+> protected content hash; a revision rolls them back rather than letting a stale
+> approval through (#616) — see
+> [docs/approved-payroll-revision-protection.md](docs/approved-payroll-revision-protection.md)
+> for the protected fields, failure messages, and rollback semantics.
 
 ## Prerequisites
 

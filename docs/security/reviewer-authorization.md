@@ -106,6 +106,19 @@ pub struct RunReview {
 }
 ```
 
+### 3.2 Multi-stage draft approvals and revision protection
+
+For drafts that require several sign-offs, the contract tracks a
+`MultiStageApproval` (`contracts/payroll/src/signing.rs`) bound to the draft
+revision's **protected content hash** (total amount, employee count, obligation
+root, metadata hash). Approvals are revision-specific: a signer can only approve
+the revision whose hash they were given, a signer may approve once per revision,
+and the revision locks once the threshold is met. Revising a protected field
+rolls the approvals back so a stale approval can never authorise the new
+revision (#616). See
+[Approved Payroll Revision Protection](../approved-payroll-revision-protection.md)
+for the full rules and entrypoints.
+
 ---
 
 ## 4. Permission Boundary & Security Controls

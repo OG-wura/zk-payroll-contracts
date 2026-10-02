@@ -55,6 +55,9 @@ pub use employee_suspension_rules::{
     evaluate_suspension_payout, EmployeeStatus, PayrollPayoutRule,
 };
 
+/// Multi-stage approval primitives for protected payroll draft revisions (#616).
+pub mod signing;
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
@@ -1102,6 +1105,18 @@ pub enum CompanyState {
 //
 // See `contracts/integration_tests/` for versioning test examples.
 
+/// Storage key for approved payroll revision protection (#616).
+///
+/// Deliberately separate from [`DataKey`]: that enum is already at the
+/// Soroban contract-spec ceiling of 50 cases, so this feature is keyed on
+/// its own enum to leave every existing storage key untouched.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalKey {
+    /// Multi-stage approval tracker bound to a draft's protected revision.
+    DraftApproval(u64),
+}
+
 #[contracttype]
 pub enum DataKey {
     Addresses,
@@ -1518,6 +1533,18 @@ impl Payroll {
             if pm_client.is_paused() {
                 panic!("Payroll is paused");
             }
+        }
+    }
+
+    /// Require that `admin` is the configured contract admin.
+    fn require_admin(e: &Env, admin: &Address) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != &addrs.admin {
+            panic!("Unauthorized");
         }
     }
 
@@ -8498,6 +8525,174 @@ impl Payroll {
             .set(&DataKey::RunReview(run_id), &superseding);
 
         payroll_events::emit_run_approval_superseded(&e, run_id, review.reviewer, reviewer);
+    }
+
+    // ── Issue #616: approved payroll revision protection ─────────────────────
+
+    /// Initialise the multi-stage approval tracker for a draft revision.
+    ///
+    /// Only the admin may call. The tracker is bound to the **protected
+    /// content hash** of the revision — total amount, employee count,
+    /// obligation root, and metadata hash — so any later revision of those
+    /// fields invalidates the approvals collected against this revision.
+    #[allow(clippy::too_many_arguments)]
+    pub fn init_draft_approval(
+        e: Env,
+        admin: Address,
+        draft_id: u64,
+        total_amount: i128,
+        employee_count: u32,
+        obligation_root: BytesN<32>,
+        metadata_hash: BytesN<32>,
+        required_approvals: u32,
+    ) -> signing::MultiStageApproval {
+        Self::require_not_paused(&e);
+        Self::require_admin(&e, &admin);
+        admin.require_auth();
+
+        if total_amount <= 0 {
+            panic!("total_amount must be positive");
+        }
+        if required_approvals == 0 {
+            panic!("required_approvals must be positive");
+        }
+
+        let protected_content_hash = signing::compute_protected_content_hash(
+            &e,
+            total_amount,
+            employee_count,
+            &obligation_root,
+            &metadata_hash,
+        );
+        let approval = signing::init_multi_stage_approval(
+            &e,
+            draft_id,
+            protected_content_hash,
+            required_approvals,
+        );
+        e.storage()
+            .persistent()
+            .set(&ApprovalKey::DraftApproval(draft_id), &approval);
+        approval
+    }
+
+    /// Record an approval signature against a draft's protected revision.
+    ///
+    /// The supplied `protected_content_hash` must match the revision the
+    /// tracker is bound to; a stale hash is rejected so an approval collected
+    /// before a revision cannot be replayed. A signer may approve a revision
+    /// only once, and no approvals are accepted once the revision is locked.
+    ///
+    /// # Panics
+    /// - If the draft has no approval tracker.
+    /// - If the revision is already locked.
+    /// - If the supplied hash does not match the protected revision.
+    /// - If the signer has already approved this revision.
+    pub fn submit_draft_approval(
+        e: Env,
+        signer: Address,
+        draft_id: u64,
+        protected_content_hash: BytesN<32>,
+    ) -> signing::MultiStageApproval {
+        Self::require_not_paused(&e);
+        signer.require_auth();
+
+        let mut approval: signing::MultiStageApproval = e
+            .storage()
+            .persistent()
+            .get(&ApprovalKey::DraftApproval(draft_id))
+            .expect("Draft approval not initialized");
+
+        if approval.is_locked {
+            panic!("Draft is locked");
+        }
+        if protected_content_hash != approval.protected_content_hash {
+            panic!("Stale approval reused: protected fields changed");
+        }
+        if approval.signers.contains(&signer) {
+            panic!("Duplicate approval from same signer");
+        }
+
+        approval.signers.push_back(signer);
+        approval.current_approvals += 1;
+        approval.current_stage = approval.current_approvals;
+        if approval.current_approvals >= approval.required_approvals {
+            approval.is_locked = true;
+        }
+
+        e.storage()
+            .persistent()
+            .set(&ApprovalKey::DraftApproval(draft_id), &approval);
+        approval
+    }
+
+    /// Read the approval state bound to a draft revision, if one exists.
+    pub fn get_draft_approval_state(e: Env, draft_id: u64) -> Option<signing::MultiStageApproval> {
+        e.storage()
+            .persistent()
+            .get(&ApprovalKey::DraftApproval(draft_id))
+    }
+
+    /// Revise a draft's protected fields and roll back collected approvals.
+    ///
+    /// Only the admin may call. When the new protected fields produce a
+    /// different hash, the tracker is re-bound to the new revision and every
+    /// approval collected for the previous revision is discarded, so a stale
+    /// approval can never authorise the revised run. A revision that leaves the
+    /// protected fields unchanged keeps the existing approvals.
+    pub fn amend_draft_with_rollback(
+        e: Env,
+        admin: Address,
+        draft_id: u64,
+        new_total_amount: i128,
+        new_employee_count: u32,
+        new_obligation_root: BytesN<32>,
+        new_metadata_hash: BytesN<32>,
+    ) -> signing::MultiStageApproval {
+        Self::require_not_paused(&e);
+        Self::require_admin(&e, &admin);
+        admin.require_auth();
+
+        if new_total_amount <= 0 {
+            panic!("total_amount must be positive");
+        }
+
+        let mut approval: signing::MultiStageApproval = e
+            .storage()
+            .persistent()
+            .get(&ApprovalKey::DraftApproval(draft_id))
+            .expect("Draft approval not initialized");
+
+        let new_hash = signing::compute_protected_content_hash(
+            &e,
+            new_total_amount,
+            new_employee_count,
+            &new_obligation_root,
+            &new_metadata_hash,
+        );
+
+        if new_hash != approval.protected_content_hash {
+            // The protected revision changed: protect the approved revision by
+            // invalidating every approval collected for the old one.
+            approval.protected_content_hash = new_hash;
+            approval.current_approvals = 0;
+            approval.current_stage = 0;
+            approval.is_locked = false;
+            approval.signers = Vec::new(&e);
+            e.storage()
+                .persistent()
+                .set(&ApprovalKey::DraftApproval(draft_id), &approval);
+
+            e.events().publish(
+                (
+                    symbol_short!("payroll"),
+                    Symbol::new(&e, "approvals_rolled_back"),
+                ),
+                (draft_id,),
+            );
+        }
+
+        approval
     }
 
     /// Read contract dependency addresses configured during initialization.
